@@ -1,0 +1,59 @@
+name: Public signed image acceptance
+
+on:
+  workflow_run:
+    workflows: [Dadoku tests and immutable image]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-smoke:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.path == '.github/workflows/dadoku-build.yml'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+      attestations: read
+    env:
+      SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+      SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+      SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Download exact successful-run evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          gh run download "$SOURCE_RUN_ID"
+          --name "dadoku-image-$SOURCE_RUN_ID-$SOURCE_RUN_ATTEMPT"
+          --dir "$RUNNER_TEMP/dadoku-evidence"
+      - name: Authenticate read-only to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+          DOCKER_CONFIG: ${{ runner.temp }}/dadoku-smoke-docker
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+      - name: Verify signed image provenance and negative policy cases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKER_CONFIG: ${{ runner.temp }}/dadoku-smoke-docker
+        run: |
+          gh version
+          python3 verify_provenance.py "$RUNNER_TEMP/dadoku-evidence/dadoku-image.json"
+      - name: Run exact verified image with container constraints
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/dadoku-smoke-docker
+        run: python3 ci_smoke.py "$RUNNER_TEMP/dadoku-evidence/dadoku-image.json"
